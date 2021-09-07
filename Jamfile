@@ -114,6 +114,10 @@ if $(OS) = NT { #Windows
 
 #Store the names of all the .cpp files to build into a variable:
 GAME_NAMES =
+	SpeedChangeMissileComponent
+	CurveMissileComponent
+	SineWeaveMissileComponent
+	Missile
 	PongMode
 	main
 	load_save_png

@@ -1,8 +1,8 @@
-# (TODO: your game's title)
+# Bullet Gel
 
-Author: (TODO: your name)
+Author: Thomas Wrabetz
 
-Design: (TODO: In two sentences or fewer, describe what is new and interesting about your game.)
+Design: In this game, you dodge missiles with various combinations of movement behaviors.
 
 Screen Shot:
 
@@ -10,8 +10,10 @@ Screen Shot:
 
 How To Play:
 
-(TODO: describe the controls and (if needed) goals/strategy.)
+Move the player by moving the mouse. Avoid all missiles.
 
-Sources: (TODO: list a source URL for any assets you did not create yourself. Make sure you have a license for the asset.)
+If the screen goes black, you lost. Please restart the exe to try again.
+
+Sources: No assets for this game.
 
 This game was built with [NEST](NEST.md).

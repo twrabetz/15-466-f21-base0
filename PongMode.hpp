@@ -5,6 +5,8 @@
 
 #include <glm/glm.hpp>
 
+#include "Missile.hpp"
+
 #include <vector>
 #include <deque>
 
@@ -23,26 +25,30 @@ struct PongMode : Mode {
 
 	//----- game state -----
 
-	glm::vec2 court_radius = glm::vec2(7.0f, 5.0f);
-	glm::vec2 paddle_radius = glm::vec2(0.2f, 1.0f);
-	glm::vec2 ball_radius = glm::vec2(0.2f, 0.2f);
+	glm::vec2 court_radius = glm::vec2(9.0f, 5.0f);
+	glm::vec2 player_radius = glm::vec2(0.2f, 0.2f);
 
-	glm::vec2 left_paddle = glm::vec2(-court_radius.x + 0.5f, 0.0f);
-	glm::vec2 right_paddle = glm::vec2( court_radius.x - 0.5f, 0.0f);
+	glm::vec2 player = glm::vec2(-court_radius.x + 0.5f, 0.0f);
+	glm::vec2 playerTarget = glm::vec2(0.0f, 0.0f);
+	float playerSpeed = 15;
 
-	glm::vec2 ball = glm::vec2(0.0f, 0.0f);
-	glm::vec2 ball_velocity = glm::vec2(-1.0f, 0.0f);
+	std::vector<Missile*> missiles;
+	std::deque<int> deadMissiles;
+
+	float danger = 0;
+	float dangerAccumulationRate = 1.0f;
+	float dangerAccumulationIncreaseRate = 0.01f;
+	float maxDangerAccumulationRate = 4.0f;
+	float missileProbabilityPerSecond = 0.5f;
+	float missileProbabilityPerSecondIncreaseRate = 0.01f;
+	float maxMissileProbabilityPerSecond = 0.925f;
 
 	uint32_t left_score = 0;
 	uint32_t right_score = 0;
 
-	float ai_offset = 0.0f;
-	float ai_offset_update = 0.0f;
+	bool lost_game = false;
 
-	//----- pretty gradient trails -----
-
-	float trail_length = 1.3f;
-	std::deque< glm::vec3 > ball_trail; //stores (x,y,age), oldest elements first
+	float lifetime = 0;
 
 	//----- opengl assets / helpers ------
 

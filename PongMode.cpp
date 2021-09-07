@@ -8,13 +8,13 @@
 
 #include <random>
 
+#include <iostream>
+
 PongMode::PongMode() {
 
-	//set up trail as if ball has been here for 'forever':
-	ball_trail.clear();
-	ball_trail.emplace_back(ball, trail_length);
-	ball_trail.emplace_back(ball, 0.0f);
+	srand((unsigned int)time(NULL));
 
+	missiles.emplace_back(new Missile(1, court_radius));
 	
 	//----- allocate OpenGL resources -----
 	{ //vertex buffer:
@@ -113,6 +113,9 @@ PongMode::~PongMode() {
 	glDeleteVertexArrays(1, &vertex_buffer_for_color_texture_program);
 	vertex_buffer_for_color_texture_program = 0;
 
+	for (Missile* missile : missiles)
+		delete missile;
+
 	glDeleteTextures(1, &white_tex);
 	white_tex = 0;
 }
@@ -125,7 +128,8 @@ bool PongMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 			(evt.motion.x + 0.5f) / window_size.x * 2.0f - 1.0f,
 			(evt.motion.y + 0.5f) / window_size.y *-2.0f + 1.0f
 		);
-		left_paddle.y = (clip_to_court * glm::vec3(clip_mouse, 1.0f)).y;
+		playerTarget.x = clip_mouse.x * court_radius.x;
+		playerTarget.y = clip_mouse.y * court_radius.y;
 	}
 
 	return false;
@@ -133,120 +137,95 @@ bool PongMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 
 void PongMode::update(float elapsed) {
 
+	lifetime += elapsed;
+
+	if (lost_game)
+		return;
+
 	static std::mt19937 mt; //mersenne twister pseudo-random number generator
 
-	//----- paddle update -----
+	//----- player update -----
 
-	{ //right player ai:
-		ai_offset_update -= elapsed;
-		if (ai_offset_update < elapsed) {
-			//update again in [0.5,1.0) seconds:
-			ai_offset_update = (mt() / float(mt.max())) * 0.5f + 0.5f;
-			ai_offset = (mt() / float(mt.max())) * 2.5f - 1.25f;
-		}
-		if (right_paddle.y < ball.y + ai_offset) {
-			right_paddle.y = std::min(ball.y + ai_offset, right_paddle.y + 2.0f * elapsed);
-		} else {
-			right_paddle.y = std::max(ball.y + ai_offset, right_paddle.y - 2.0f * elapsed);
+	{ //Move player towards the mouse based on speed
+		glm::vec2 diff = playerTarget - player;
+		if( glm::length(diff) > 0 )
+			player += glm::normalize(diff) * std::min(glm::length(diff), playerSpeed * elapsed);
+	}
+
+	//clamp player to court:
+
+	player.x = std::max(player.x, -court_radius.x + player_radius.x);
+	player.x = std::min(player.x, court_radius.x - player_radius.x);
+	player.y = std::max(player.y, -court_radius.y + player_radius.y);
+	player.y = std::min(player.y,  court_radius.y - player_radius.y);
+
+	//----- create missiles -----
+	if (lifetime > 5)
+	{
+		if (dangerAccumulationRate < maxDangerAccumulationRate)
+			dangerAccumulationRate = std::min(maxDangerAccumulationRate, dangerAccumulationRate + dangerAccumulationIncreaseRate * elapsed);
+
+		if (missileProbabilityPerSecond < maxMissileProbabilityPerSecond)
+			missileProbabilityPerSecond = std::min(maxMissileProbabilityPerSecond, missileProbabilityPerSecond + missileProbabilityPerSecondIncreaseRate * elapsed);
+
+		danger += elapsed * dangerAccumulationRate;
+
+		float randomValue = ((float)rand()) / RAND_MAX;
+		double frameProbability = 1 - pow(1 - missileProbabilityPerSecond, elapsed);
+		if (randomValue < frameProbability || danger > 4)
+		{
+			if (deadMissiles.size() > 0)
+			{
+				int i = deadMissiles.front();
+				delete missiles[i];
+				missiles[i] = new Missile(danger, court_radius);
+				deadMissiles.pop_front();
+			}
+			else
+				missiles.emplace_back(new Missile(danger, court_radius));
+			danger = 0;
 		}
 	}
 
-	//clamp paddles to court:
-	right_paddle.y = std::max(right_paddle.y, -court_radius.y + paddle_radius.y);
-	right_paddle.y = std::min(right_paddle.y,  court_radius.y - paddle_radius.y);
+	//----- missile updates -----
+	
+	for (int i = 0; i < missiles.size(); i++ )
+	{
+		if (missiles[i]->dead)
+			continue;
+		missiles[i]->update(elapsed);
 
-	left_paddle.y = std::max(left_paddle.y, -court_radius.y + paddle_radius.y);
-	left_paddle.y = std::min(left_paddle.y,  court_radius.y - paddle_radius.y);
+		//---- collision handling ----
 
-	//----- ball update -----
-
-	//speed of ball doubles every four points:
-	float speed_multiplier = 4.0f * std::pow(2.0f, (left_score + right_score) / 4.0f);
-
-	//velocity cap, though (otherwise ball can pass through paddles):
-	speed_multiplier = std::min(speed_multiplier, 10.0f);
-
-	ball += elapsed * speed_multiplier * ball_velocity;
-
-	//---- collision handling ----
-
-	//paddles:
-	auto paddle_vs_ball = [this](glm::vec2 const &paddle) {
 		//compute area of overlap:
-		glm::vec2 min = glm::max(paddle - paddle_radius, ball - ball_radius);
-		glm::vec2 max = glm::min(paddle + paddle_radius, ball + ball_radius);
+		glm::vec2 min = glm::max(player - player_radius, missiles[i]->position - missiles[i]->radius);
+		glm::vec2 max = glm::min(player + player_radius, missiles[i]->position + missiles[i]->radius);
 
-		//if no overlap, no collision:
-		if (min.x > max.x || min.y > max.y) return;
+		//collision with player
+		if (min.x <= max.x && min.y <= max.y)
+			lost_game = true;
 
-		if (max.x - min.x > max.y - min.y) {
-			//wider overlap in x => bounce in y direction:
-			if (ball.y > paddle.y) {
-				ball.y = paddle.y + paddle_radius.y + ball_radius.y;
-				ball_velocity.y = std::abs(ball_velocity.y);
-			} else {
-				ball.y = paddle.y - paddle_radius.y - ball_radius.y;
-				ball_velocity.y = -std::abs(ball_velocity.y);
-			}
-		} else {
-			//wider overlap in y => bounce in x direction:
-			if (ball.x > paddle.x) {
-				ball.x = paddle.x + paddle_radius.x + ball_radius.x;
-				ball_velocity.x = std::abs(ball_velocity.x);
-			} else {
-				ball.x = paddle.x - paddle_radius.x - ball_radius.x;
-				ball_velocity.x = -std::abs(ball_velocity.x);
-			}
-			//warp y velocity based on offset from paddle center:
-			float vel = (ball.y - paddle.y) / (paddle_radius.y + ball_radius.y);
-			ball_velocity.y = glm::mix(ball_velocity.y, vel, 0.75f);
+		//court walls:
+		if (missiles[i]->corePosition.y > court_radius.y - missiles[i]->radius.y || missiles[i]->corePosition.y < -court_radius.y + missiles[i]->radius.y ||
+			missiles[i]->corePosition.x > court_radius.x - missiles[i]->radius.x || missiles[i]->corePosition.x < -court_radius.x + missiles[i]->radius.x) {
+			missiles[i]->dead = true;
+			deadMissiles.push_back(i);
 		}
-	};
-	paddle_vs_ball(left_paddle);
-	paddle_vs_ball(right_paddle);
 
-	//court walls:
-	if (ball.y > court_radius.y - ball_radius.y) {
-		ball.y = court_radius.y - ball_radius.y;
-		if (ball_velocity.y > 0.0f) {
-			ball_velocity.y = -ball_velocity.y;
+		//----- gradient trails -----
+
+		//age up all locations in missile trail:
+		for (auto& t : missiles[i]->trail) {
+			t.z += elapsed;
 		}
-	}
-	if (ball.y < -court_radius.y + ball_radius.y) {
-		ball.y = -court_radius.y + ball_radius.y;
-		if (ball_velocity.y < 0.0f) {
-			ball_velocity.y = -ball_velocity.y;
+		//store fresh location at back of missile trail:
+		missiles[i]->trail.emplace_back(missiles[i]->position, 0.0f);
+
+		//trim any too-old locations from back of trail:
+		//NOTE: since trail drawing interpolates between points, only removes back element if second-to-back element is too old:
+		while (missiles[i]->trail.size() >= 2 && missiles[i]->trail[1].z > missiles[i]->trail_length) {
+			missiles[i]->trail.pop_front();
 		}
-	}
-
-	if (ball.x > court_radius.x - ball_radius.x) {
-		ball.x = court_radius.x - ball_radius.x;
-		if (ball_velocity.x > 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			left_score += 1;
-		}
-	}
-	if (ball.x < -court_radius.x + ball_radius.x) {
-		ball.x = -court_radius.x + ball_radius.x;
-		if (ball_velocity.x < 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			right_score += 1;
-		}
-	}
-
-	//----- gradient trails -----
-
-	//age up all locations in ball trail:
-	for (auto &t : ball_trail) {
-		t.z += elapsed;
-	}
-	//store fresh location at back of ball trail:
-	ball_trail.emplace_back(ball, 0.0f);
-
-	//trim any too-old locations from back of trail:
-	//NOTE: since trail drawing interpolates between points, only removes back element if second-to-back element is too old:
-	while (ball_trail.size() >= 2 && ball_trail[1].z > trail_length) {
-		ball_trail.pop_front();
 	}
 }
 
@@ -256,11 +235,8 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 	const glm::u8vec4 bg_color = HEX_TO_U8VEC4(0x193b59ff);
 	const glm::u8vec4 fg_color = HEX_TO_U8VEC4(0xf2d2b6ff);
 	const glm::u8vec4 shadow_color = HEX_TO_U8VEC4(0xf2ad94ff);
-	const std::vector< glm::u8vec4 > trail_colors = {
-		HEX_TO_U8VEC4(0xf2ad9488),
-		HEX_TO_U8VEC4(0xf2897288),
-		HEX_TO_U8VEC4(0xbacac088),
-	};
+	const glm::u8vec4 black = HEX_TO_U8VEC4(0x000000ff);
+	const glm::u8vec4 fadedWhite = HEX_TO_U8VEC4(0xffffff22);
 	#undef HEX_TO_U8VEC4
 
 	//other useful drawing constants:
@@ -285,88 +261,88 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 		vertices.emplace_back(glm::vec3(center.x-radius.x, center.y+radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
 	};
 
-	//shadows for everything (except the trail):
+	glm::vec2 score_radius = glm::vec2(0.1f, 0.1f);
 
-	glm::vec2 s = glm::vec2(0.0f,-shadow_offset);
+	if (lost_game)
+	{
+		draw_rectangle(glm::vec2(0, 0), glm::vec2(court_radius.x * 2, court_radius.y * 2), black);
+	}
+	else
+	{
 
-	draw_rectangle(glm::vec2(-court_radius.x-wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( court_radius.x+wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( 0.0f,-court_radius.y-wall_radius)+s, glm::vec2(court_radius.x, wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( 0.0f, court_radius.y+wall_radius)+s, glm::vec2(court_radius.x, wall_radius), shadow_color);
-	draw_rectangle(left_paddle+s, paddle_radius, shadow_color);
-	draw_rectangle(right_paddle+s, paddle_radius, shadow_color);
-	draw_rectangle(ball+s, ball_radius, shadow_color);
+		//shadows for everything (except the trail):
 
-	//ball's trail:
-	if (ball_trail.size() >= 2) {
-		//start ti at second element so there is always something before it to interpolate from:
-		std::deque< glm::vec3 >::iterator ti = ball_trail.begin() + 1;
-		//draw trail from oldest-to-newest:
-		constexpr uint32_t STEPS = 20;
-		//draw from [STEPS, ..., 1]:
-		for (uint32_t step = STEPS; step > 0; --step) {
-			//time at which to draw the trail element:
-			float t = step / float(STEPS) * trail_length;
-			//advance ti until 'just before' t:
-			while (ti != ball_trail.end() && ti->z > t) ++ti;
-			//if we ran out of recorded tail, stop drawing:
-			if (ti == ball_trail.end()) break;
-			//interpolate between previous and current trail point to the correct time:
-			glm::vec3 a = *(ti-1);
-			glm::vec3 b = *(ti);
-			glm::vec2 at = (t - a.z) / (b.z - a.z) * (glm::vec2(b) - glm::vec2(a)) + glm::vec2(a);
+		glm::vec2 s = glm::vec2(0.0f, -shadow_offset);
 
-			//look up color using linear interpolation:
-			//compute (continuous) index:
-			float c = (step-1) / float(STEPS-1) * trail_colors.size();
-			//split into an integer and fractional portion:
-			int32_t ci = int32_t(std::floor(c));
-			float cf = c - ci;
-			//clamp to allowable range (shouldn't ever be needed but good to think about for general interpolation):
-			if (ci < 0) {
-				ci = 0;
-				cf = 0.0f;
+		draw_rectangle(glm::vec2(-court_radius.x - wall_radius, 0.0f) + s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
+		draw_rectangle(glm::vec2(court_radius.x + wall_radius, 0.0f) + s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
+		draw_rectangle(glm::vec2(0.0f, -court_radius.y - wall_radius) + s, glm::vec2(court_radius.x, wall_radius), shadow_color);
+		draw_rectangle(glm::vec2(0.0f, court_radius.y + wall_radius) + s, glm::vec2(court_radius.x, wall_radius), shadow_color);
+		draw_rectangle(player + s, player_radius, shadow_color);
+		for (Missile* missile : missiles)
+		{
+			if (missile->dead)
+				continue;
+
+			//missile's trail:
+			if (missile->trail.size() >= 2) {
+				//start ti at second element so there is always something before it to interpolate from:
+				std::deque< glm::vec3 >::iterator ti = missile->trail.begin() + 1;
+				//draw trail from oldest-to-newest:
+				constexpr uint32_t STEPS = 20;
+				//draw from [STEPS, ..., 1]:
+				for (uint32_t step = STEPS; step > 0; --step) {
+					//time at which to draw the trail element:
+					float t = step / float(STEPS) * missile->trail_length;
+
+					//advance ti until 'just before' t:
+					while (ti != missile->trail.end() && ti->z > t) ++ti;
+					//if we ran out of recorded tail, stop drawing:
+					if (ti == missile->trail.end()) break;
+					//interpolate between previous and current trail point to the correct time:
+					glm::vec3 a = *(ti - 1);
+					glm::vec3 b = *(ti);
+					glm::vec2 at = (t - a.z) / (b.z - a.z) * (glm::vec2(b) - glm::vec2(a)) + glm::vec2(a);
+
+					//do the interpolation (casting to floating point vectors because glm::mix doesn't have an overload for u8 vectors):
+					glm::u8vec4 color = glm::u8vec4(
+						glm::mix(glm::vec4(missile->color), glm::vec4(fadedWhite), t / missile->trail_length)
+					);
+
+					//draw:
+					draw_rectangle(at, missile->radius, color);
+				}
 			}
-			if (ci > int32_t(trail_colors.size())-2) {
-				ci = int32_t(trail_colors.size())-2;
-				cf = 1.0f;
-			}
-			//do the interpolation (casting to floating point vectors because glm::mix doesn't have an overload for u8 vectors):
-			glm::u8vec4 color = glm::u8vec4(
-				glm::mix(glm::vec4(trail_colors[ci]), glm::vec4(trail_colors[ci+1]), cf)
-			);
+		}
 
-			//draw:
-			draw_rectangle(at, ball_radius, color);
+		//solid objects:
+
+		//walls:
+		draw_rectangle(glm::vec2(-court_radius.x - wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
+		draw_rectangle(glm::vec2(court_radius.x + wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
+		draw_rectangle(glm::vec2(0.0f, -court_radius.y - wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
+		draw_rectangle(glm::vec2(0.0f, court_radius.y + wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
+
+		//paddles:
+		draw_rectangle(player, player_radius, fg_color);
+
+
+		//missiles:
+		for( Missile* missile : missiles )
+		{ 
+			if (missile->dead)
+				continue;
+			draw_rectangle(missile->position, missile->radius, missile->main_color);
+		}
+
+		//scores:
+		for (uint32_t i = 0; i < left_score; ++i) {
+			draw_rectangle(glm::vec2(-court_radius.x + (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
+		}
+		for (uint32_t i = 0; i < right_score; ++i) {
+			draw_rectangle(glm::vec2(court_radius.x - (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
 		}
 	}
-
-	//solid objects:
-
-	//walls:
-	draw_rectangle(glm::vec2(-court_radius.x-wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
-	draw_rectangle(glm::vec2( court_radius.x+wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
-	draw_rectangle(glm::vec2( 0.0f,-court_radius.y-wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
-	draw_rectangle(glm::vec2( 0.0f, court_radius.y+wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
-
-	//paddles:
-	draw_rectangle(left_paddle, paddle_radius, fg_color);
-	draw_rectangle(right_paddle, paddle_radius, fg_color);
-	
-
-	//ball:
-	draw_rectangle(ball, ball_radius, fg_color);
-
-	//scores:
-	glm::vec2 score_radius = glm::vec2(0.1f, 0.1f);
-	for (uint32_t i = 0; i < left_score; ++i) {
-		draw_rectangle(glm::vec2( -court_radius.x + (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
-	}
-	for (uint32_t i = 0; i < right_score; ++i) {
-		draw_rectangle(glm::vec2( court_radius.x - (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
-	}
-
-
 
 	//------ compute court-to-window transform ------
 
